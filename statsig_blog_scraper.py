@@ -164,8 +164,127 @@ class StatsigBlogScraper:
         
         return categories if categories else ['General']
     
+    def extract_data_points(self, text):
+        """Extract quantitative metrics and data points from text"""
+        data_points = []
+        
+        # Patterns for metrics
+        patterns = [
+            r'\b(\d+)%\s+(increase|decrease|improvement|reduction|faster|slower|more|less)',
+            r'\b(\d+[,.]?\d*)\s*(million|billion|thousand|k|m|b)\s+(users|events|requests|experiments)',
+            r'\breduced?\s+by\s+(\d+)%',
+            r'\bimproved?\s+by\s+(\d+)%',
+            r'\b(\d+[,.]?\d*)\s*(ms|seconds?|minutes?|hours?)\s+(faster|slower|latency|response time)',
+            r'\bfrom\s+(\d+)\s+to\s+(\d+)',
+        ]
+        
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        for sentence in sentences:
+            for pattern in patterns:
+                if re.search(pattern, sentence, re.IGNORECASE):
+                    if len(sentence) < 200 and sentence not in data_points:
+                        data_points.append(sentence.strip())
+                        break
+            if len(data_points) >= 5:
+                break
+        
+        return data_points
+    
+    def extract_examples(self, text):
+        """Extract concrete examples and use cases"""
+        examples = []
+        lines = text.split('\n')
+        
+        # Look for example indicators
+        example_patterns = [
+            r'for example[,:]?',
+            r'for instance[,:]?',
+            r'such as[,:]?',
+            r'e\.g\.',
+            r'example:',
+            r'use case:',
+            r'case study:',
+        ]
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if line contains example indicator
+            for pattern in example_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    # Get context: current line + next 1-2 lines if they're related
+                    context = [line]
+                    for j in range(i+1, min(i+3, len(lines))):
+                        next_line = lines[j].strip()
+                        if next_line and not next_line.startswith('##'):
+                            context.append(next_line)
+                        else:
+                            break
+                    
+                    example_text = ' '.join(context)
+                    if 50 <= len(example_text) <= 300:
+                        examples.append(example_text)
+                        break
+            
+            if len(examples) >= 3:
+                break
+        
+        return examples
+    
+    def extract_key_takeaways(self, text, title):
+        """Extract actionable takeaways and insights"""
+        takeaways = []
+        lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+        
+        # Look for conclusion/takeaway sections
+        conclusion_keywords = ['conclusion', 'takeaway', 'summary', 'key insight', 'lesson learned', 'in summary']
+        in_conclusion_section = False
+        
+        for i, line in enumerate(lines):
+            # Detect conclusion sections
+            if any(keyword in line.lower() for keyword in conclusion_keywords):
+                in_conclusion_section = True
+                continue
+            
+            # Extract from conclusion sections
+            if in_conclusion_section:
+                if line.startswith('## ') or line.startswith('### '):
+                    in_conclusion_section = False
+                    continue
+                if re.match(r'^(?:[\-\*•]|\d+\.)\s+', line):
+                    point = re.sub(r'^(?:[\-\*•]|\d+\.)\s+', '', line)
+                    if 30 <= len(point) <= 200:
+                        takeaways.append(point)
+            
+            if len(takeaways) >= 5:
+                break
+        
+        # If no explicit takeaways found, extract actionable sentences
+        if len(takeaways) < 3:
+            action_patterns = [
+                r'\bshould\b',
+                r'\bmust\b',
+                r'\brecommend\b',
+                r'\bbest practice\b',
+                r'\bimportant to\b',
+                r'\bkey is to\b',
+                r'\bmake sure\b',
+            ]
+            
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            for sentence in sentences:
+                if any(re.search(pattern, sentence, re.IGNORECASE) for pattern in action_patterns):
+                    if 40 <= len(sentence) <= 200 and sentence not in takeaways:
+                        takeaways.append(sentence.strip())
+                        if len(takeaways) >= 5:
+                            break
+        
+        return takeaways[:5]
+
     def summarize_post(self, post_data):
-        """Generate a richer summary that preserves main points and concrete examples"""
+        """Generate a comprehensive summary with examples, data points, and takeaways"""
         text = post_data.get('text', '') or ''
         title = post_data.get('title', '') or ''
 
@@ -181,34 +300,22 @@ class StatsigBlogScraper:
         lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
         headers = [ln for ln in lines if ln.startswith('## ') or ln.startswith('### ') or ln.startswith('#### ')]
 
-        # Heuristics to find example/evidence sentences
-        example_re = re.compile(r'\b(for example|e\.g\.|example|case (study|in point))\b', re.IGNORECASE)
-        metric_re = re.compile(r'(\b\d+%\b|\b\d+\s*(ms|s|sec|seconds|minutes|hrs|hours|days)\b|\b\d+[,.]?\d*\s*(users|events|requests|experiments|variants)\b|\bimprov|increase|decreas|reduce|faster|slower\b)', re.IGNORECASE)
-
+        # Build comprehensive summary
         intro = next((s for s in sentences if not s.startswith('##') and len(s) > 40), '')
         second = next((s for s in sentences[1:] if not s.startswith('##') and len(s) > 40), '')
-        example = next((s for s in sentences if example_re.search(s)), '')
-        metric = next((s for s in sentences if metric_re.search(s)), '')
-
-        # Build summary ensuring inclusion of examples/evidence when available
-        parts = []
+        
+        summary_parts = []
         if intro:
-            parts.append(intro)
+            summary_parts.append(intro)
         if second and second != intro:
-            parts.append(second)
-        if example and example not in parts:
-            parts.append(f"Example: {example}")
-        if metric and metric not in parts:
-            parts.append(metric)
-
-        summary = ' '.join(parts)
+            summary_parts.append(second)
+        
+        summary = ' '.join(summary_parts)[:800]
         if not summary:
             summary = f"Article about {title}".strip()
-        summary = summary[:1000]
 
-        # Key points: prefer explicit bullets, then headers, then concise sentences
+        # Key points: prefer explicit bullets, then headers
         key_points = []
-        # 1) Bulleted or numbered list items anywhere in the article
         for ln in lines:
             if re.match(r'^(?:[\-\*•]|\d+\.)\s+', ln):
                 point = re.sub(r'^(?:[\-\*•]|\d+\.)\s+', '', ln)
@@ -216,7 +323,7 @@ class StatsigBlogScraper:
                     key_points.append(point)
             if len(key_points) >= 8:
                 break
-        # 2) Section headers as thematic points
+        
         if len(key_points) < 8:
             for h in headers:
                 point = re.sub(r'^#+\s*', '', h)
@@ -224,89 +331,230 @@ class StatsigBlogScraper:
                     key_points.append(point)
                 if len(key_points) >= 8:
                     break
-        # 3) Evidence/example sentences if still short
-        if len(key_points) < 8 and example:
-            ex_point = re.sub(r'^(Example:|example:)?\s*', '', example)
-            key_points.append(f"Example: {ex_point}")
-        if len(key_points) < 8 and metric and metric not in key_points:
-            key_points.append(metric)
 
-        # Trim and de-dup
+        # Deduplicate key points
         seen = set()
         deduped = []
         for p in key_points:
             p = p.strip()
-            if p and p not in seen:
+            if p and p.lower() not in seen:
                 deduped.append(p)
-                seen.add(p)
-        key_points = deduped[:10]
+                seen.add(p.lower())
+        key_points = deduped[:8]
+        
+        # Extract additional rich content
+        data_points = self.extract_data_points(text)
+        examples = self.extract_examples(text)
+        takeaways = self.extract_key_takeaways(text, title)
 
         return {
             'summary': summary,
-            'key_points': key_points
+            'key_points': key_points,
+            'data_points': data_points,
+            'examples': examples,
+            'takeaways': takeaways
+        }
+    
+    def get_category_prompts(self):
+        """Return customized prompt suggestions for each category"""
+        return {
+            'A/B Testing & Experimentation': [
+                "What are the best practices for designing experiments with multiple variants?",
+                "How should I handle statistical significance and p-values in A/B tests?",
+                "What are common pitfalls in experimentation and how can I avoid them?",
+                "How do I design experiments to avoid multiple comparison problems?",
+            ],
+            'AI & Machine Learning': [
+                "What are best practices for implementing AI features with experimentation?",
+                "How can I measure and validate AI model performance in production?",
+                "What are considerations for A/B testing AI-generated content?",
+            ],
+            'Product Analytics': [
+                "What metrics should I track for [feature/product]?",
+                "How do I set up analytics to measure user engagement?",
+                "What are best practices for event tracking and data collection?",
+            ],
+            'Feature Management': [
+                "How should I implement feature flags for gradual rollouts?",
+                "What are best practices for feature flag lifecycle management?",
+                "How do I use feature gates to minimize deployment risk?",
+            ],
+            'Engineering & Infrastructure': [
+                "What are the performance optimization techniques used at scale?",
+                "How can I improve infrastructure efficiency and reduce costs?",
+                "What architecture patterns work best for high-traffic services?",
+            ],
+            'Case Studies & Success Stories': [
+                "What lessons from [company] case study apply to my situation?",
+                "How have other teams solved [specific challenge]?",
+                "What outcomes can I expect from implementing [approach]?",
+            ],
+            'Best Practices & Guides': [
+                "What is the recommended approach for [specific task]?",
+                "What are the key considerations when implementing [feature]?",
+                "How do I get started with [topic]?",
+            ],
         }
     
     def generate_markdown(self, categorized_posts):
-        """Generate markdown output for ChatGPT/Claude"""
-        md = ["# Statsig Blog Posts - Categorized & Summarized\n"]
-        md.append(f"*Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n")
-        md.append(f"*Total Posts: {sum(len(posts) for posts in categorized_posts.values())}*\n")
-        md.append("---\n")
-        
-        # Table of contents
-        md.append("## Table of Contents\n")
-        for category in sorted(categorized_posts.keys()):
-            md.append(f"- [{category}](#{category.lower().replace(' ', '-').replace('&', '')})")
+        """Generate comprehensive markdown output optimized for AI assistants"""
+        md = ["# Statsig Blog Knowledge Base\n"]
+        md.append("## Comprehensive Guide for AI-Assisted Development\n")
+        md.append(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n")
+        md.append(f"*Total Articles: {sum(len(posts) for posts in categorized_posts.values())}*\n")
+        md.append(f"*Categories: {len(categorized_posts)}*\n")
         md.append("\n---\n")
         
-        # Posts by category
+        # Overview section
+        md.append("\n## 📋 Overview\n")
+        md.append("""
+This knowledge base contains deep insights from Statsig's engineering blog, organized for maximum utility in AI-assisted development workflows. Each article includes:
+
+- **Comprehensive summaries** with context and background
+- **Concrete examples** and real-world use cases  
+- **Quantitative data points** and performance metrics
+- **Actionable takeaways** you can apply immediately
+- **Direct source links** for deeper exploration
+
+Use this resource to inform technical decisions, learn best practices, and understand proven patterns in experimentation, feature management, and product analytics.
+""")
+        
+        # Table of contents with stats
+        md.append("\n## 📚 Table of Contents\n")
+        for category in sorted(categorized_posts.keys()):
+            count = len(categorized_posts[category])
+            anchor = category.lower().replace(' ', '-').replace('&', '').replace('--', '-')
+            md.append(f"- [{category}](#{anchor}) — {count} article{'s' if count != 1 else ''}\n")
+        
+        md.append("\n---\n")
+        
+        # Category-specific prompts
+        category_prompts = self.get_category_prompts()
+        
+        # Posts by category with rich formatting
         for category in sorted(categorized_posts.keys()):
             posts = categorized_posts[category]
+            anchor = category.lower().replace(' ', '-').replace('&', '').replace('--', '-')
+            
             md.append(f"\n## {category}\n")
-            md.append(f"*{len(posts)} posts*\n")
+            md.append(f"*{len(posts)} article{'s' if len(posts) != 1 else ''}*\n")
+            
+            # Add category-specific prompts
+            if category in category_prompts:
+                md.append("\n### 💡 Suggested Questions for This Category\n")
+                for prompt in category_prompts[category]:
+                    md.append(f"- {prompt}\n")
+                md.append("\n")
             
             for i, post in enumerate(posts, 1):
                 md.append(f"\n### {i}. {post['title']}\n")
+                
+                # Metadata line
+                metadata = []
                 if post.get('date'):
-                    md.append(f"**Date:** {post['date']}  ")
+                    metadata.append(f"📅 {post['date']}")
                 if post.get('author'):
-                    md.append(f"**Author:** {post['author']}  ")
-                md.append(f"**URL:** {post['url']}\n")
+                    metadata.append(f"✍️ {post['author']}")
+                if metadata:
+                    md.append(' | '.join(metadata) + '\n')
                 
-                md.append(f"\n**Summary:**  \n{post['summary']}\n")
+                md.append(f"\n🔗 **Source:** {post['url']}\n")
                 
+                # Summary
+                md.append(f"\n**📖 Summary**\n\n{post['summary']}\n")
+                
+                # Key Points
                 if post.get('key_points'):
-                    md.append("\n**Key Points:**\n")
+                    md.append("\n**🎯 Key Points**\n")
                     for point in post['key_points']:
                         md.append(f"- {point}\n")
                 
+                # Data Points & Metrics
+                if post.get('data_points'):
+                    md.append("\n**📊 Data Points & Metrics**\n")
+                    for dp in post['data_points']:
+                        md.append(f"- {dp}\n")
+                
+                # Examples
+                if post.get('examples'):
+                    md.append("\n**💼 Examples & Use Cases**\n")
+                    for example in post['examples']:
+                        md.append(f"- {example}\n")
+                
+                # Takeaways
+                if post.get('takeaways'):
+                    md.append("\n**✅ Key Takeaways**\n")
+                    for takeaway in post['takeaways']:
+                        md.append(f"- {takeaway}\n")
+                
                 md.append("\n---\n")
         
-        # Add instructions section
-        md.append("\n## Instructions for AI Assistant\n")
+        # Enhanced instructions for AI assistants
+        md.append("\n## 🤖 AI Assistant Usage Guide\n")
         md.append("""
-### How to Use This Document
+### How to Leverage This Knowledge Base
 
-**Context:**
-This document contains categorized summaries of Statsig blog posts covering experimentation, feature flags, product analytics, and engineering practices.
+**For Users (Prompting Strategies):**
 
-**When brainstorming:**
-1. **Reference specific categories** when discussing related topics
-2. **Cite examples** from case studies and best practices
-3. **Apply patterns** from engineering and infrastructure posts
-4. **Consider trade-offs** mentioned in the articles
-5. **Use the key points** as starting points for deeper discussions
+1. **Be Specific with Context**
+   - ❌ "Tell me about A/B testing"
+   - ✅ "Based on Statsig's A/B testing articles, what are best practices for handling multiple variants with traffic imbalance?"
 
-**Suggested prompts:**
-- "Based on the A/B testing posts, what are best practices for [specific scenario]?"
-- "What engineering patterns does Statsig use for [specific challenge]?"
-- "Compare approaches mentioned in the feature management vs. experimentation categories"
-- "What lessons from the case studies apply to [your situation]?"
+2. **Reference Examples and Data**
+   - ❌ "How do I optimize performance?"
+   - ✅ "What performance optimization techniques does Statsig use? Include specific metrics from the engineering articles."
 
-**Topic areas covered:**
+3. **Ask for Comparisons**
+   - "Compare feature flag strategies vs. experimentation approaches mentioned in the articles"
+   - "What are the tradeoffs between approaches mentioned in [Article X] vs [Article Y]?"
+
+4. **Request Actionable Guidance**
+   - "Based on the case studies, give me a step-by-step plan to implement [feature]"
+   - "What are the top 5 takeaways from the product analytics category that apply to [my scenario]?"
+
+**For AI Assistants (How to Use This Context):**
+
+1. **Cite Sources**
+   - Always reference specific articles when drawing insights
+   - Include URLs so users can read full details
+   - Quote data points and metrics accurately
+
+2. **Synthesize Across Articles**
+   - Combine insights from multiple articles in the same category
+   - Identify patterns and common themes
+   - Note when articles present different perspectives
+
+3. **Prioritize Concrete Information**
+   - Lead with examples and data points
+   - Highlight actionable takeaways
+   - Explain technical concepts using examples from the articles
+
+4. **Acknowledge Limitations**
+   - Note when information is dated (check article dates)
+   - Indicate when a topic isn't covered in the knowledge base
+   - Suggest areas where the user should consult current documentation
+
+### Category-Specific Use Cases
+
 """)
+        
         for category in sorted(categorized_posts.keys()):
-            md.append(f"- **{category}**: {len(categorized_posts[category])} articles\n")
+            post_count = len(categorized_posts[category])
+            md.append(f"**{category}** ({post_count} article{'s' if post_count != 1 else ''})\n")
+            
+            if category in category_prompts:
+                md.append("Example prompts:\n")
+                for prompt in category_prompts[category][:2]:  # Show first 2
+                    md.append(f"  - {prompt}\n")
+            md.append("\n")
+        
+        # Quick reference
+        md.append("\n### 📌 Quick Reference\n")
+        md.append(f"- **Total Knowledge Base Size**: ~{sum(len(posts) for posts in categorized_posts.values())} articles\n")
+        md.append(f"- **Coverage Areas**: {', '.join(sorted(categorized_posts.keys()))}\n")
+        md.append(f"- **Last Updated**: {datetime.now().strftime('%Y-%m-%d')}\n")
+        md.append("\n---\n")
+        md.append("\n*End of Knowledge Base*\n")
         
         return '\n'.join(md)
     
