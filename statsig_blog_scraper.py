@@ -102,9 +102,24 @@ class StatsigBlogScraper:
                     article = h1_tag.parent.parent  # Go up to likely container
             
             if article:
-                # Extract all text content
-                paragraphs = article.find_all(['p', 'h2', 'h3', 'h4', 'li'])
-                content['text'] = '\n'.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+                # Extract all text content with lightweight structure hints
+                elements = article.find_all(['p', 'h2', 'h3', 'h4', 'li'])
+                lines = []
+                for el in elements:
+                    txt = el.get_text(strip=True)
+                    if not txt:
+                        continue
+                    if el.name == 'h2':
+                        lines.append(f"## {txt}")
+                    elif el.name == 'h3':
+                        lines.append(f"### {txt}")
+                    elif el.name == 'h4':
+                        lines.append(f"#### {txt}")
+                    elif el.name == 'li':
+                        lines.append(f"- {txt}")
+                    else:  # paragraph
+                        lines.append(txt)
+                content['text'] = '\n'.join(lines)
             else:
                 # Last resort: get all paragraphs from body
                 paragraphs = soup.find_all('p')
@@ -150,32 +165,85 @@ class StatsigBlogScraper:
         return categories if categories else ['General']
     
     def summarize_post(self, post_data):
-        """Generate a summary with main points"""
-        text = post_data.get('text', '')
-        title = post_data.get('title', '')
-        
-        # Extract first few sentences as summary
-        sentences = re.split(r'[.!?]+', text)
-        summary = '. '.join([s.strip() for s in sentences[:3] if len(s.strip()) > 20])
-        
-        # Extract key points (look for numbered lists, bullet points, or headers)
+        """Generate a richer summary that preserves main points and concrete examples"""
+        text = post_data.get('text', '') or ''
+        title = post_data.get('title', '') or ''
+
+        # Normalize whitespace
+        text = re.sub(r'\u00A0', ' ', text)
+        text = re.sub(r'\s+\n', '\n', text)
+
+        # Split into sentences (keep punctuation)
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 0]
+
+        # Identify section headers from structured hints we inject (##, ###)
+        lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+        headers = [ln for ln in lines if ln.startswith('## ') or ln.startswith('### ') or ln.startswith('#### ')]
+
+        # Heuristics to find example/evidence sentences
+        example_re = re.compile(r'\b(for example|e\.g\.|example|case (study|in point))\b', re.IGNORECASE)
+        metric_re = re.compile(r'(\b\d+%\b|\b\d+\s*(ms|s|sec|seconds|minutes|hrs|hours|days)\b|\b\d+[,.]?\d*\s*(users|events|requests|experiments|variants)\b|\bimprov|increase|decreas|reduce|faster|slower\b)', re.IGNORECASE)
+
+        intro = next((s for s in sentences if not s.startswith('##') and len(s) > 40), '')
+        second = next((s for s in sentences[1:] if not s.startswith('##') and len(s) > 40), '')
+        example = next((s for s in sentences if example_re.search(s)), '')
+        metric = next((s for s in sentences if metric_re.search(s)), '')
+
+        # Build summary ensuring inclusion of examples/evidence when available
+        parts = []
+        if intro:
+            parts.append(intro)
+        if second and second != intro:
+            parts.append(second)
+        if example and example not in parts:
+            parts.append(f"Example: {example}")
+        if metric and metric not in parts:
+            parts.append(metric)
+
+        summary = ' '.join(parts)
+        if not summary:
+            summary = f"Article about {title}".strip()
+        summary = summary[:1000]
+
+        # Key points: prefer explicit bullets, then headers, then concise sentences
         key_points = []
-        lines = text.split('\n')
-        for line in lines[:50]:  # First 50 lines
-            line = line.strip()
-            # Look for lines that start with numbers, bullets, or are short statements
-            if line and (
-                re.match(r'^\d+\.', line) or 
-                re.match(r'^[•\-\*]', line) or
-                (len(line) < 150 and len(line) > 30 and line[0].isupper())
-            ):
-                key_points.append(line.lstrip('0123456789.•-* '))
-                if len(key_points) >= 5:
+        # 1) Bulleted or numbered list items anywhere in the article
+        for ln in lines:
+            if re.match(r'^(?:[\-\*•]|\d+\.)\s+', ln):
+                point = re.sub(r'^(?:[\-\*•]|\d+\.)\s+', '', ln)
+                if 25 <= len(point) <= 180:
+                    key_points.append(point)
+            if len(key_points) >= 8:
+                break
+        # 2) Section headers as thematic points
+        if len(key_points) < 8:
+            for h in headers:
+                point = re.sub(r'^#+\s*', '', h)
+                if 15 <= len(point) <= 120 and point not in key_points:
+                    key_points.append(point)
+                if len(key_points) >= 8:
                     break
-        
+        # 3) Evidence/example sentences if still short
+        if len(key_points) < 8 and example:
+            ex_point = re.sub(r'^(Example:|example:)?\s*', '', example)
+            key_points.append(f"Example: {ex_point}")
+        if len(key_points) < 8 and metric and metric not in key_points:
+            key_points.append(metric)
+
+        # Trim and de-dup
+        seen = set()
+        deduped = []
+        for p in key_points:
+            p = p.strip()
+            if p and p not in seen:
+                deduped.append(p)
+                seen.add(p)
+        key_points = deduped[:10]
+
         return {
-            'summary': summary[:500] if summary else f"Article about {title}",
-            'key_points': key_points[:5]
+            'summary': summary,
+            'key_points': key_points
         }
     
     def generate_markdown(self, categorized_posts):
